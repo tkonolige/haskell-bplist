@@ -113,15 +113,15 @@ trailerSize = 32
 
 decodePList :: BL.ByteString -> Either String PList
 decodePList s = runExcept $ do
-  if BL.take 8 s == "bplist00" then return () else throwError "invalid file format, must be bplist00"
+  unless (BL.take 8 s == "bplist00") $ throwError "invalid file format, must be bplist00"
   -- decode the trailer to figure out where offsets are
-  trailer <- decodeBinary (BL.drop ((BL.length s) - trailerSize) s) get
+  trailer <- decodeBinary (BL.drop (BL.length s - trailerSize) s) get
   -- decode all the offsets
   offsets <- decodeBinary (BL.drop (fromIntegral $ offsetTableOffset trailer) s) 
                           (replicateM (fromIntegral $ numObjects trailer) $ getWordbe $ fromIntegral $ offsetIntSize trailer)
   -- transform each offset into an object
   objects <- mapM (\off -> decodeBinary (BL.drop (fromIntegral off) s) (getObject (fromIntegral $ objectRefSize trailer))) offsets
-  return $ (fromIntermediate $ objects) !! fromIntegral (topObject trailer)
+  return $ fromIntermediate objects !! fromIntegral (topObject trailer)
     where
       thrd (a,b,c) = c
       decodeBinary :: BL.ByteString -> Get a -> Except String a
@@ -129,13 +129,13 @@ decodePList s = runExcept $ do
       getWordbe :: Int -> Get Int
       getWordbe size = do
         words <- replicateM size getWord8
-        return $ P.foldl (\b a -> (shiftL b 8) .|. (fromIntegral a)) 0 words
+        return $ P.foldl (\b a -> shiftL b 8 .|. fromIntegral a) 0 words
 
       getObject refSize = do
         let getRef = getWordbe refSize
         -- items are prefixed by type and size
         w <- getWord8
-        let l = (w .&. 0xf) -- lower bytes are length
+        let l = w .&. 0xf -- lower bytes are length
             i = shiftR w 4 -- high bytes are type
         len <- fromIntegral <$> 
                  case l of
@@ -217,7 +217,7 @@ encodePList plist = runPut $ do
   (r,s) <- S.runStateT (do
       putByteString' "bplist00"
       putObjectOffset plist
-    ) (PState { _refNum = 1, _offset = 0, _objOffsets = [] })
+    ) PState { _refNum = 1, _offset = 0, _objOffsets = [] }
   let trailer = Trailer { unused1 = 0
                         , unused2 = 0
                         , shortVersion = 0
@@ -227,7 +227,7 @@ encodePList plist = runPut $ do
                         , topObject = 0
                         , offsetTableOffset = fromIntegral $ s ^. offset
                         }
-  S.evalStateT (mapM_ (putWordbe (offsetIntSize trailer)) (s ^. objOffsets)) (PState { _refNum = 1, _offset = 0, _objOffsets = [] })
+  S.evalStateT (mapM_ (putWordbe (offsetIntSize trailer)) (s ^. objOffsets)) PState { _refNum = 1, _offset = 0, _objOffsets = [] }
   put trailer
   return r
   where
@@ -240,10 +240,10 @@ encodePList plist = runPut $ do
     bytesToEncode :: Int -> Int 
     bytesToEncode numThings = let go 0 i = i
                                   go x i = go (shiftR x 8) (i+1)
-                               in go (numThings) 0 
+                               in go numThings 0 
 
     putRef :: Int -> PutState
-    putRef x = putWordbe (bytesToEncode numRefs) x
+    putRef = putWordbe (bytesToEncode numRefs)
 
     putWordbe maxSize x | maxSize <= 1 = putWord8'    $ fromIntegral x
     putWordbe maxSize x | maxSize <= 2 = putWord16be' $ fromIntegral x
@@ -273,14 +273,14 @@ encodePList plist = runPut $ do
     putObject' (PUTF16 x) = putByteString' $ TE.encodeUtf16BE x
     putObject' (PArray x) = do
       ind <- use refNum
-      mapM putRef [ind.. ind + V.length x - 1]
+      mapM_ putRef [ind.. ind + V.length x - 1]
       refNum += V.length x
       V.mapM_ putObjectOffset x
     putObject' (PDict  x) = do
       ind <- use refNum
-      mapM putRef [ind.. ind + H.size x * 2 - 1]
+      mapM_ putRef [ind.. ind + H.size x * 2 - 1]
       refNum += H.size x * 2
-      mapM_ putObjectOffset $ map PASCII $ H.keys x
+      mapM_ (putObjectOffset . PASCII) $ H.keys x
       mapM_ putObjectOffset $ H.elems x
 
     putInt64' x = do
