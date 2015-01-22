@@ -2,9 +2,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
-module Data.PList.Binary (
-                           PList(..)
+module Data.PList.Binary ( PList(..)
                          , decodePList
                          , encodePList
                          ) where
@@ -18,13 +18,13 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Binary
 import Data.Binary.Get
 import Data.Binary.Put
+import Data.Binary.IEEE754
 import Data.Bits
 
-import Data.Word
 import Data.Int
 import GHC.Float
 
-import Data.Time
+import Data.Time.Clock.POSIX
 import qualified Data.Text as T
 import Data.Text.Encoding as TE
 
@@ -33,33 +33,33 @@ import Control.Monad as M hiding (mapM)
 import Control.Monad.Except hiding (mapM)
 import Control.Monad.Identity hiding (mapM)
 import qualified Control.Monad.State as S
-import Control.Monad.Trans
 
 import Data.Bifunctor
 import Control.Lens
-import Data.List.Lens
 
 import Data.Traversable
+
+-- see http://opensource.apple.com/source/CF/CF-744.18/CFBinaryPList.c for reference
 
 -- | A property list. Used by OS X and iOS
 data PList = PBool Bool                           -- ^ boolean
            | PInt Int64                           -- ^ signed integer
            | PReal Double                         -- ^ floating point
-           | PDate UTCTime                        -- ^ date
+           | PDate POSIXTime                      -- ^ date
            | PData B.ByteString                   -- ^ binary data
            | PASCII B.ByteString                  -- ^ ascii string
            | PUTF16 T.Text                        -- ^ utf-16 string
            | PUID Word64                          -- ^ unsigned integer
            | PArray (V.Vector PList)              -- ^ array
            | PDict (H.HashMap B.ByteString PList) -- ^ dictionary
-           deriving (Show, Read, Eq)
+           deriving (Show, Eq)
 
 -- Intemediate plist data structure
 -- TODO: dont use intermediate data structure
 data ImPList = IBool Bool
              | IInt Int64
              | IReal Double
-             | IDate UTCTime
+             | IDate POSIXTime
              | IData B.ByteString
              | IASCII B.ByteString
              | IUTF16 T.Text
@@ -68,24 +68,21 @@ data ImPList = IBool Bool
              | IDict [(Int, Int)] -- an dictionary of references
              deriving (Show)
 
-toIntermediate :: PList -> [ImPList]
-toIntermediate plist = undefined
-
 fromIntermediate :: [ImPList] -> [PList]
 fromIntermediate xs = converted
   where
     converted = P.map convert xs
-    convert (IBool x)  = PBool x
-    convert (IInt x)   = PInt x
-    convert (IReal x)  = PReal x
-    convert (IDate x)  = PDate x
-    convert (IData x)  = PData x
+    convert (IBool  x) = PBool x
+    convert (IInt   x) = PInt x
+    convert (IReal  x) = PReal x
+    convert (IDate  x) = PDate x
+    convert (IData  x) = PData x
     convert (IASCII x) = PASCII x
     convert (IUTF16 x) = PUTF16 x
-    convert (IUID x)   = PUID x
-    convert (IArray x) = PArray $ V.fromList (P.map (converted !!) x)
-    convert (IDict x)  = PDict $ H.fromList (P.map (\(a,b) -> (unwrap (converted !! a), converted !! b)) x)
-    unwrap (PASCII x) = x
+    convert (IUID   x) = PUID x
+    convert (IArray x) = PArray $ V.fromList (P.map (converted !!)                                       x)
+    convert (IDict  x) = PDict $ H.fromList (P.map (\(a,b) -> (unwrap (xs !! a), converted !! b)) x)
+    unwrap (IASCII x) = x
 
 data Trailer = Trailer { unused1           :: Word8
                        , unused2           :: Word32
@@ -109,6 +106,7 @@ instance Binary Trailer where
     putWord64be $ topObject t
     putWord64be $ offsetTableOffset t
 
+trailerSize :: Int64
 trailerSize = 32
 
 decodePList :: BL.ByteString -> Either String PList
@@ -123,13 +121,13 @@ decodePList s = runExcept $ do
   objects <- mapM (\off -> decodeBinary (BL.drop (fromIntegral off) s) (getObject (fromIntegral $ objectRefSize trailer))) offsets
   return $ fromIntermediate objects !! fromIntegral (topObject trailer)
     where
-      thrd (a,b,c) = c
+      thrd (_, _, c) = c
       decodeBinary :: BL.ByteString -> Get a -> Except String a
-      decodeBinary s g = ExceptT $ Identity $ bimap thrd thrd $ runGetOrFail g s
+      decodeBinary str g = ExceptT $ Identity $ bimap thrd thrd $ runGetOrFail g str
       getWordbe :: Int -> Get Int
       getWordbe size = do
-        words <- replicateM size getWord8
-        return $ P.foldl (\b a -> shiftL b 8 .|. fromIntegral a) 0 words
+        bytes <- replicateM size getWord8
+        return $ P.foldl (\b a -> shiftL b 8 .|. fromIntegral a) 0 bytes
 
       getObject refSize = do
         let getRef = getWordbe refSize
@@ -143,25 +141,28 @@ decodePList s = runExcept $ do
                      -- if size if 0xf, then the actualy size is encoded as a plist integer following this byte
                      plint <- getObject refSize :: Get ImPList
                      case plint of
-                       IInt i -> return i
+                       IInt int -> return int
                        _      -> fail "Expected integer for extended length"
                    _ -> return $ fromIntegral l
         case i of
-          0x0 -> return $ IBool $ l /= 0 -- bool is encoded in length
+          0x0 -> case l of -- bool is encoded in length as 0b1001 for true and 0b1000 for false
+                   8 -> return $ IBool False
+                   9 -> return $ IBool True
+                   _ -> fail $ "unexpected bool constant " ++ show l
           0x1 -> IInt <$> case l of -- 2^i = byte length of integer TODO: support arbitrary lengths
-                                          0 -> fromIntegral <$> (get :: Get Int8)
-                                          1 -> fromIntegral <$> (get :: Get Int16)
-                                          2 -> fromIntegral <$> (get :: Get Int32)
-                                          3 -> fromIntegral <$> (get :: Get Int64)
-                                          x -> fail $ "invalid integer length: " P.++ show x
+                            0 -> fromIntegral <$> (get :: Get Int8)
+                            1 -> fromIntegral <$> (get :: Get Int16)
+                            2 -> fromIntegral <$> (get :: Get Int32)
+                            3 -> fromIntegral <$> (get :: Get Int64)
+                            x -> fail $ "invalid integer length: " P.++ show x
           0x2 -> IReal <$> case l of -- similar encoding to integer
-                                            2 -> float2Double <$> (get :: Get Float)
-                                            3 -> get :: Get Double
-                                            _ -> fail "invalid float size"
-          0x3 -> undefined
+                             2 -> float2Double <$> getFloat32be
+                             3 -> getFloat64be
+                             _ -> fail "invalid float size"
+          0x3 -> IDate <$> realToFrac <$> getFloat64be
           0x4 -> IData <$> getByteString len
           0x5 -> IASCII <$> getByteString len
-          0x6 -> IUTF16 <$> (decodeUtf16BE <$> getByteString len)
+          0x6 -> IUTF16 <$> (decodeUtf16BE <$> getByteString (len * 2))
           0x8 -> IUID <$> case l of
                                           0 -> fromIntegral <$> (get :: Get Word8)
                                           1 -> fromIntegral <$> (get :: Get Word16)
@@ -192,19 +193,19 @@ typeId (PDict  _) = 0xd
 -- TODO: pack ints and words based on size
 -- | How many bytes an elcoded object occupies
 elemLen :: PList -> Int
-elemLen (PBool  x) = 0
-elemLen (PInt   x) = 3
-elemLen (PReal  x) = 3
-elemLen (PDate  x) = undefined
+elemLen (PBool  _) = 0
+elemLen (PInt   _) = 3
+elemLen (PReal  _) = 3
+elemLen (PDate  _) = 3
 elemLen (PData  x) = B.length x
 elemLen (PASCII x) = B.length x
-elemLen (PUTF16 x) = B.length $ TE.encodeUtf16BE x --TODO: can encoding be avoided
-elemLen (PUID   x) = 3
+elemLen (PUTF16 x) = T.length x
+elemLen (PUID   _) = 3
 elemLen (PArray x) = V.length x
 elemLen (PDict  x) = H.size x
 
-data PState = PState { _refNum :: Int
-                     , _offset :: Int
+data PState = PState { _refNum     :: Int
+                     , _offset     :: Int
                      , _objOffsets :: [Int]
                      } deriving (Show)
 makeLenses ''PState
@@ -243,7 +244,9 @@ encodePList plist = runPut $ do
                                in go numThings 0 
 
     putRef :: Int -> PutState
-    putRef = putWordbe (bytesToEncode numRefs)
+    putRef x = do
+      refNum += 1
+      putWordbe (bytesToEncode numRefs) x
 
     putWordbe maxSize x | maxSize <= 1 = putWord8'    $ fromIntegral x
     putWordbe maxSize x | maxSize <= 2 = putWord16be' $ fromIntegral x
@@ -251,8 +254,8 @@ encodePList plist = runPut $ do
     putWordbe maxSize x | maxSize <= 8 = putWord64be' $ fromIntegral x
 
     putObjectLen :: PList -> PutState
-    putObjectLen (PBool True)       = putWord8' 1
-    putObjectLen (PBool False)      = putWord8' 0
+    putObjectLen (PBool True)       = putWord8' 9
+    putObjectLen (PBool False)      = putWord8' 8
     putObjectLen x | elemLen x < 15 = putWord8' $ shiftL (typeId x) 4 .|. fromIntegral (elemLen x)
     putObjectLen x                  = putWord8' (shiftL (typeId x) 4 .|. 0xf) >> putObject (PInt $ fromIntegral $ elemLen x)
 
@@ -264,30 +267,36 @@ encodePList plist = runPut $ do
     putObject :: PList -> PutState
     putObject x = putObjectLen x >> putObject' x
     putObject' :: PList -> PutState
-    putObject' (PBool  x) = return () -- bool is encoded with size of type
+    putObject' (PBool  _) = return () -- bool is encoded with size of type
     putObject' (PInt   x) = putInt64' x
     putObject' (PReal  x) = putDouble' x
-    putObject' (PDate  x) = undefined
+    putObject' (PDate  x) = putDouble' $ fromRational $ toRational x
     putObject' (PData  x) = putByteString' x
     putObject' (PASCII x) = putByteString' x
     putObject' (PUTF16 x) = putByteString' $ TE.encodeUtf16BE x
+    putObject' (PUID   x) = putWord64' x
     putObject' (PArray x) = do
       ind <- use refNum
-      mapM_ putRef [ind.. ind + V.length x - 1]
-      refNum += V.length x
+      mapM_ putRef $ getRefs ind $ V.toList x
       V.mapM_ putObjectOffset x
     putObject' (PDict  x) = do
       ind <- use refNum
-      mapM_ putRef [ind.. ind + H.size x * 2 - 1]
-      refNum += H.size x * 2
+      mapM_ putRef [ind.. ind + H.size x - 1]
+      mapM_ putRef $ getRefs (ind + H.size x - 1) $ H.elems x
       mapM_ (putObjectOffset . PASCII) $ H.keys x
       mapM_ putObjectOffset $ H.elems x
+
+    getRefs ind [] = []
+    getRefs ind (x:xs) = ind : getRefs (ind + numRefs' x + 1) xs
 
     putInt64' x = do
       lift $ put x
       offset += 8
-    putDouble' x = do
+    putWord64' x = do
       lift $ put x
+      offset += 8
+    putDouble' x = do
+      lift $ putFloat64be x
       offset += 8
     putByteString' x = do
       lift $ putByteString x
