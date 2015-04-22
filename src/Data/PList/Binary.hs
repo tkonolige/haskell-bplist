@@ -115,7 +115,7 @@ decodePList s = runExcept $ do
   -- decode the trailer to figure out where offsets are
   trailer <- decodeBinary (BL.drop (BL.length s - trailerSize) s) get
   -- decode all the offsets
-  offsets <- decodeBinary (BL.drop (fromIntegral $ offsetTableOffset trailer) s) 
+  offsets <- decodeBinary (BL.drop (fromIntegral $ offsetTableOffset trailer) s)
                           (replicateM (fromIntegral $ numObjects trailer) $ getWordbe $ fromIntegral $ offsetIntSize trailer)
   -- transform each offset into an object
   objects <- mapM (\off -> decodeBinary (BL.drop (fromIntegral off) s) (getObject (fromIntegral $ objectRefSize trailer))) offsets
@@ -135,7 +135,7 @@ decodePList s = runExcept $ do
         w <- getWord8
         let l = w .&. 0xf -- lower bytes are length
             i = shiftR w 4 -- high bytes are type
-        len <- fromIntegral <$> 
+        len <- fromIntegral <$>
                  case l of
                    15 | i /= 0 && i /= 1 && i /= 2 && i /= 3 -> do
                      -- if size if 0xf, then the actualy size is encoded as a plist integer following this byte
@@ -214,7 +214,7 @@ type PutState = S.StateT PState PutM ()
 
 -- | binary encode a PList
 encodePList :: PList -> BL.ByteString
-encodePList plist = runPut $ do 
+encodePList plist = runPut $ do
   (r,s) <- S.runStateT (do
       putByteString' "bplist00"
       putObjectOffset plist
@@ -237,11 +237,11 @@ encodePList plist = runPut $ do
     numRefs' (PArray x) = V.length x + V.sum (V.map numRefs' x)
     numRefs' (PDict x)  = H.size x * 2 + sum (map numRefs' (H.elems x))
     numRefs' _          = 0
-   
-    bytesToEncode :: Int -> Int 
+
+    bytesToEncode :: Int -> Int
     bytesToEncode numThings = let go 0 i = i
                                   go x i = go (shiftR x 8) (i+1)
-                               in go numThings 0 
+                               in go numThings 0
 
     putRef :: Int -> PutState
     putRef x = do
