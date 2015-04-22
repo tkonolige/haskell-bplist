@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Data.PList.Binary ( PList(..)
                          , decodePList
@@ -28,7 +29,6 @@ import Data.Time.Clock.POSIX
 import qualified Data.Text as T
 import Data.Text.Encoding as TE
 
-import Control.Applicative
 import Control.Monad as M hiding (mapM)
 import Control.Monad.Except hiding (mapM)
 import Control.Monad.Identity hiding (mapM)
@@ -286,7 +286,7 @@ encodePList plist = runPut $ do
       mapM_ (putObjectOffset . PASCII) $ H.keys x
       mapM_ putObjectOffset $ H.elems x
 
-    getRefs ind [] = []
+    getRefs _ [] = []
     getRefs ind (x:xs) = ind : getRefs (ind + numRefs' x + 1) xs
 
     putInt64' x = do

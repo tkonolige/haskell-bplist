@@ -1,7 +1,6 @@
 name:                bplist
 version:             0.1.0.0
--- synopsis:            
--- description:         
+description:         Encoding and decoding for Apple's Binary Property List format
 license:             BSD3
 license-file:        LICENSE
 author:              Tristan Konolige
@@ -13,7 +12,7 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Data.PList.Binary
-  build-depends:       base >=4.7 && <4.8,
+  build-depends:       base >=4 && <5,
                        unordered-containers,
                        binary,
                        vector,
