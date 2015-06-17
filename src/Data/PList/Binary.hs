@@ -6,6 +6,16 @@
 {-# LANGUAGE FlexibleContexts #-}
 
 module Data.PList.Binary ( PList(..)
+                         , _PBool
+                         , _PInt
+                         , _PReal
+                         , _PDate
+                         , _PData
+                         , _PASCII
+                         , _PUTF16
+                         , _PUID
+                         , _PArray
+                         , _PDict
                          , decodePList
                          , encodePList
                          ) where
@@ -53,6 +63,8 @@ data PList = PBool Bool                           -- ^ boolean
            | PArray (V.Vector PList)              -- ^ array
            | PDict (H.HashMap B.ByteString PList) -- ^ dictionary
            deriving (Show, Eq)
+
+makePrisms ''PList
 
 -- Intemediate plist data structure
 -- TODO: dont use intermediate data structure
